@@ -1,0 +1,5 @@
+choir.yaml
+.env
+/choir
+/bin/
+*.log
