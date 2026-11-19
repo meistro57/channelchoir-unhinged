@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/meistro57/channelchoir/internal/config"
+	"github.com/meistro57/channelchoir-unhinged/internal/config"
 )
 
 // The shared process-wide ceiling must hold even when multiple independent

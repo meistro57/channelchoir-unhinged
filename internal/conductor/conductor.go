@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/meistro57/channelchoir/internal/config"
-	"github.com/meistro57/channelchoir/internal/discordio"
-	"github.com/meistro57/channelchoir/internal/llm"
-	"github.com/meistro57/channelchoir/internal/persona"
+	"github.com/meistro57/channelchoir-unhinged/internal/config"
+	"github.com/meistro57/channelchoir-unhinged/internal/discordio"
+	"github.com/meistro57/channelchoir-unhinged/internal/llm"
+	"github.com/meistro57/channelchoir-unhinged/internal/persona"
 )
 
 // Conductor is the whole point of this project. Ten voices generating text is

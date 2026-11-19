@@ -6,10 +6,10 @@ import (
 	"log"
 	"sync"
 
-	"github.com/meistro57/channelchoir/internal/config"
-	"github.com/meistro57/channelchoir/internal/discordio"
-	"github.com/meistro57/channelchoir/internal/llm"
-	"github.com/meistro57/channelchoir/internal/persona"
+	"github.com/meistro57/channelchoir-unhinged/internal/config"
+	"github.com/meistro57/channelchoir-unhinged/internal/discordio"
+	"github.com/meistro57/channelchoir-unhinged/internal/llm"
+	"github.com/meistro57/channelchoir-unhinged/internal/persona"
 )
 
 // Orchestrator owns the full multi-chamber deployment: it builds one Conductor

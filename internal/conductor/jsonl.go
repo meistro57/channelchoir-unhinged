@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/meistro57/channelchoir/internal/discordio"
+	"github.com/meistro57/channelchoir-unhinged/internal/discordio"
 )
 
 // TranscriptRecord is one exported message line. It carries NO credentials:

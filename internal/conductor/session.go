@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/meistro57/channelchoir/internal/config"
-	"github.com/meistro57/channelchoir/internal/discordio"
+	"github.com/meistro57/channelchoir-unhinged/internal/config"
+	"github.com/meistro57/channelchoir-unhinged/internal/discordio"
 )
 
 // Session models one bounded conversation. It has a unique ID, an origin, a

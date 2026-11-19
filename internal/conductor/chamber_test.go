@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/meistro57/channelchoir/internal/config"
-	"github.com/meistro57/channelchoir/internal/discordio"
+	"github.com/meistro57/channelchoir-unhinged/internal/config"
+	"github.com/meistro57/channelchoir-unhinged/internal/discordio"
 )
 
 // ValidateHandoff rejects chambers whose channel/guild is outside the

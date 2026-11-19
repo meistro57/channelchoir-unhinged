@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/meistro57/channelchoir/internal/config"
+	"github.com/meistro57/channelchoir-unhinged/internal/config"
 )
 
 // Controls is the runtime state and parser for the !choir control interface.

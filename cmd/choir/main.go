@@ -10,11 +10,11 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/meistro57/channelchoir/internal/conductor"
-	"github.com/meistro57/channelchoir/internal/config"
-	"github.com/meistro57/channelchoir/internal/discordio"
-	"github.com/meistro57/channelchoir/internal/llm"
-	"github.com/meistro57/channelchoir/internal/persona"
+	"github.com/meistro57/channelchoir-unhinged/internal/conductor"
+	"github.com/meistro57/channelchoir-unhinged/internal/config"
+	"github.com/meistro57/channelchoir-unhinged/internal/discordio"
+	"github.com/meistro57/channelchoir-unhinged/internal/llm"
+	"github.com/meistro57/channelchoir-unhinged/internal/persona"
 )
 
 func main() {

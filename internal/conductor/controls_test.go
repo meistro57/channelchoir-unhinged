@@ -3,7 +3,7 @@ package conductor
 import (
 	"testing"
 
-	"github.com/meistro57/channelchoir/internal/config"
+	"github.com/meistro57/channelchoir-unhinged/internal/config"
 )
 
 func cfgWithControls(enabled bool, operators []string) *config.Config {

@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/meistro57/channelchoir/internal/config"
-	"github.com/meistro57/channelchoir/internal/discordio"
-	"github.com/meistro57/channelchoir/internal/persona"
+	"github.com/meistro57/channelchoir-unhinged/internal/config"
+	"github.com/meistro57/channelchoir-unhinged/internal/discordio"
+	"github.com/meistro57/channelchoir-unhinged/internal/persona"
 )
 
 // Chamber is one isolated test chamber (a Discord channel) with its own

@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/meistro57/channelchoir/internal/config"
+	"github.com/meistro57/channelchoir-unhinged/internal/config"
 )
 
 // Global is the PROCESS-WIDE safety envelope shared by every chamber. It owns

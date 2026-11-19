@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/meistro57/channelchoir/internal/config"
-	"github.com/meistro57/channelchoir/internal/discordio"
+	"github.com/meistro57/channelchoir-unhinged/internal/config"
+	"github.com/meistro57/channelchoir-unhinged/internal/discordio"
 )
 
 // Proves each chaos level maps to the documented behaviour knobs.

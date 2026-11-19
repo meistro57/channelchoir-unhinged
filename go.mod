@@ -1,4 +1,4 @@
-module github.com/meistro57/channelchoir
+module github.com/meistro57/channelchoir-unhinged
 
 go 1.23
 
