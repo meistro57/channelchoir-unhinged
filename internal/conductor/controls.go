@@ -155,6 +155,14 @@ func (c *Controls) setPaused(v bool) {
 	c.mu.Unlock()
 }
 
+// setChaosDirect sets the chaos level directly (used by NewChamber to seed
+// a per-chamber level without going through the command parser).
+func (c *Controls) setChaosDirect(n int) {
+	c.mu.Lock()
+	c.chaosLevel = n
+	c.mu.Unlock()
+}
+
 func (c *Controls) setChaos(args []string) string {
 	if len(args) == 0 {
 		return fmt.Sprintf("chaos level: %d", c.ChaosLevel())

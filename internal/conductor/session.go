@@ -66,43 +66,42 @@ func (s *Session) Participants() []string {
 	return out
 }
 
-// Reservation is a slot atomically claimed from the global budget BEFORE any
-// webhook or generation work begins. The slot is already spent the moment it
-// is returned; it is never refunded on a failed or uncertain send, so failures
-// can only stop the choir sooner, never let it run away.
+// Reservation is a slot atomically claimed before any webhook or generation
+// work begins. The slot is already spent the moment it is returned; it is never
+// refunded on a failed or uncertain send.
 type Reservation struct{}
 
-// SessionManager owns the active session and enforces the global budget across
-// ALL personas. One shared manager means N voices selected in the same tick can
-// never collectively exceed the remaining allowance.
-//
-// Limiting layers, in order:
-//  1. kill switch file              — external, checked on every reserve.
-//  2. postedTotal vs max_messages_per_run — PROCESS-wide, never resets.
-//  3. session.Remaining              — resets only on a genuine human message.
-//  4. per-minute window             — PROCESS-wide, never resets.
-//  5. session runtime               — resets only on a genuine human message.
-//
-// Layers 2 and 4 cannot be reset by human messages: a burst of "hello" cannot
-// mint fresh budget or rate allowance.
+// SessionManager enforces the PER-CHAMBER session budget (session message cap +
+// runtime). It delegates the PROCESS-WIDE ceiling (total posts, per-minute
+// window, kill switch) to a shared *Global, so multiple chambers stack their
+// per-chamber limits on top of one common ceiling. A chamber can be stricter
+// than the global cap, never looser.
 type SessionManager struct {
-	cfg *config.Config
+	cfg    *config.Config
+	global *Global
 
 	mu      sync.Mutex
 	current *Session
 
-	// postedTotal counts every reserved slot this process run. Monotonic; never
-	// reset by NoteInbound.
-	postedTotal int
-
-	// minuteWindow is a PROCESS-wide rolling window; never reset, so rapid human
-	// messages cannot reset the per-minute rate cap.
-	minuteWindow []time.Time
+	// sessionBudgetOverride is a per-chamber session budget set via
+	// SetSessionBudget (0 = use config-derived default).
+	sessionBudgetOverride int
 }
 
+// NewSessionManager builds a single-chamber SessionManager with its OWN private
+// Global (backward-compatible with the pre-multi-chamber API).
 func NewSessionManager(cfg *config.Config) *SessionManager {
-	return &SessionManager{cfg: cfg}
+	return &SessionManager{cfg: cfg, global: NewGlobal(cfg)}
 }
+
+// NewSessionManagerShared builds a SessionManager that stacks its per-chamber
+// session budget onto the given shared process-wide Global.
+func NewSessionManagerShared(cfg *config.Config, g *Global) *SessionManager {
+	return &SessionManager{cfg: cfg, global: g}
+}
+
+// Global returns the shared ceiling backing this manager (never nil).
+func (sm *SessionManager) Global() *Global { return sm.global }
 
 // Active returns a copy of the current session (nil if none).
 func (sm *SessionManager) Active() *Session {
@@ -116,11 +115,10 @@ func (sm *SessionManager) Active() *Session {
 }
 
 // NoteInbound records an incoming message's origin and decides whether it
-// starts/restarts a session. Choir echoes NEVER start a session (an echo cannot
-// mint a fresh unlimited budget). A human message starts a fresh session (fresh
-// session budget + runtime clock) but leaves the process-wide postedTotal and
-// per-minute window untouched — so it cannot bypass them. External bots may
-// join an ongoing session but never reset it.
+// starts/restarts a session. Choir echoes NEVER start a session. A human message
+// starts a fresh session (fresh budget + runtime clock) but leaves the global
+// postedTotal and per-minute window untouched. External bots join but never
+// reset.
 func (sm *SessionManager) NoteInbound(m discordio.Message, choir *discordio.ChoirWebhooks) {
 	origin := discordio.Classify(m, choir)
 
@@ -138,15 +136,14 @@ func (sm *SessionManager) NoteInbound(m discordio.Message, choir *discordio.Choi
 		sm.current = newSession(origin, time.Now())
 		sm.current.Remaining = sm.sessionBudget()
 	case discordio.OriginExternal:
-		// Join, do not reset.
 	case discordio.OriginChoir:
-		// Never open or extend a session.
 	default:
 	}
 }
 
-// sessionBudget returns the per-session message allowance. An explicit
-// max_messages_per_session wins; otherwise the run-level cap is used.
+// sessionBudget returns the per-chamber session allowance. An explicit
+// per-chamber override (via SessionBudget) wins, then max_messages_per_session,
+// then the run-level cap.
 func (sm *SessionManager) sessionBudget() int {
 	if sm.cfg.Safeguards.MaxMessagesPerSession > 0 {
 		return sm.cfg.Safeguards.MaxMessagesPerSession
@@ -154,75 +151,76 @@ func (sm *SessionManager) sessionBudget() int {
 	return sm.cfg.Safeguards.MaxMessagesPerRun
 }
 
-// Reserve atomically checks every limit and, if all pass, consumes one slot
-// from the global budget BEFORE any webhook or generation work starts. On
-// success the caller owns (and has already spent) the slot. On error no slot
-// is consumed and the returned Reservation is nil.
-//
-// The slot is intentionally NOT refunded on a failed send: the attempt counts,
-// keeping the process-wide cap monotonic.
-func (sm *SessionManager) Reserve(now time.Time) (*Reservation, error) {
-	if err := sm.check(now, true); err != nil {
-		return nil, err
-	}
-	return &Reservation{}, nil
-}
-
-// CanPost is a non-consuming probe: it checks every limit without spending a
-// slot. Used by tests to assert a post WOULD be allowed. The live run path uses
-// Reserve.
-func (sm *SessionManager) CanPost(now time.Time) error {
-	return sm.check(now, false)
-}
-
-// check evaluates every limit under the mutex and, when consume is true, spends
-// a slot atomically. It is the single source of truth for both Reserve and
-// CanPost, so the probe and the real path can never drift.
-func (sm *SessionManager) check(now time.Time, consume bool) error {
-	if sm.cfg.Safeguards.KillSwitchPath != "" && fileExists(sm.cfg.Safeguards.KillSwitchPath) {
-		return fmt.Errorf("kill switch %q present", sm.cfg.Safeguards.KillSwitchPath)
-	}
-
+// SetSessionBudget overrides the per-chamber session budget (0 restores the
+// config-derived default). Used by chambers with a per-chamber limit.
+func (sm *SessionManager) SetSessionBudget(n int) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	sm.sessionBudgetOverride = n
+}
 
+// Reserve checks the per-chamber session budget, then consumes one slot from the
+// SHARED global ceiling, then debits the per-chamber session. On error no slot
+// is consumed.
+func (sm *SessionManager) Reserve(now time.Time) (*Reservation, error) {
+	// Atomically check + debit the PER-CHAMBER session budget under one lock
+	// hold, so concurrent goroutines cannot all pass the Remaining check before
+	// any debit lands (the TOCTOU race that must never reappear).
+	sm.mu.Lock()
 	if sm.current == nil {
-		return fmt.Errorf("no active session")
-	}
-	if sm.cfg.Safeguards.MaxMessagesPerRun > 0 && sm.postedTotal >= sm.cfg.Safeguards.MaxMessagesPerRun {
-		return fmt.Errorf("hard run message cap reached (%d)", sm.cfg.Safeguards.MaxMessagesPerRun)
+		sm.mu.Unlock()
+		return nil, fmt.Errorf("no active session")
 	}
 	if sm.current.Remaining <= 0 {
-		return fmt.Errorf("session message budget exhausted (%d)", sm.sessionBudget())
+		budget := sm.sessionBudgetLocked()
+		sm.mu.Unlock()
+		return nil, fmt.Errorf("session message budget exhausted (%d)", budget)
 	}
 	if sm.cfg.Safeguards.MaxRuntimeSeconds > 0 &&
 		int(now.Sub(sm.current.StartedAt).Seconds()) >= sm.cfg.Safeguards.MaxRuntimeSeconds {
-		return fmt.Errorf("session runtime cap reached (%ds)", sm.cfg.Safeguards.MaxRuntimeSeconds)
+		sm.mu.Unlock()
+		return nil, fmt.Errorf("session runtime cap reached (%ds)", sm.cfg.Safeguards.MaxRuntimeSeconds)
 	}
-	if sm.cfg.Safeguards.MaxMessagesPerMinute > 0 {
-		cutoff := now.Add(-time.Minute)
-		kept := sm.minuteWindow[:0]
-		for _, t := range sm.minuteWindow {
-			if t.After(cutoff) {
-				kept = append(kept, t)
-			}
+	sm.current.Remaining--
+	sm.mu.Unlock()
+
+	// Consume the SHARED global ceiling (kill switch, run cap, per-minute).
+	if err := sm.global.Reserve(now); err != nil {
+		// The global was the blocker: refund the per-chamber slot so a failing
+		// global ceiling does not silently drain chamber budgets.
+		sm.mu.Lock()
+		if sm.current != nil {
+			sm.current.Remaining++
 		}
-		sm.minuteWindow = kept
-		if len(kept) >= sm.cfg.Safeguards.MaxMessagesPerMinute {
-			return fmt.Errorf("per-minute cap reached (%d/min)", sm.cfg.Safeguards.MaxMessagesPerMinute)
-		}
+		sm.mu.Unlock()
+		return nil, err
 	}
 
-	if consume {
-		sm.postedTotal++
-		sm.current.Remaining--
-		sm.minuteWindow = append(sm.minuteWindow, now)
-	}
-	return nil
+	return &Reservation{}, nil
 }
 
-// Commit records the speaker of a previously-reserved slot. The budget was
-// already consumed by Reserve; Commit only tracks participation.
+func (sm *SessionManager) CanPost(now time.Time) error {
+	sm.mu.Lock()
+	if sm.current == nil {
+		sm.mu.Unlock()
+		return fmt.Errorf("no active session")
+	}
+	if sm.current.Remaining <= 0 {
+		budget := sm.sessionBudgetLocked()
+		sm.mu.Unlock()
+		return fmt.Errorf("session message budget exhausted (%d)", budget)
+	}
+	if sm.cfg.Safeguards.MaxRuntimeSeconds > 0 &&
+		int(now.Sub(sm.current.StartedAt).Seconds()) >= sm.cfg.Safeguards.MaxRuntimeSeconds {
+		sm.mu.Unlock()
+		return fmt.Errorf("session runtime cap reached (%ds)", sm.cfg.Safeguards.MaxRuntimeSeconds)
+	}
+	sm.mu.Unlock()
+
+	return sm.global.CanPost(now)
+}
+
+// Commit records the speaker of a previously-reserved slot.
 func (sm *SessionManager) Commit(speaker string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -231,11 +229,19 @@ func (sm *SessionManager) Commit(speaker string) {
 	}
 }
 
-// PostedTotal reports how many slots have been reserved this run.
+// PostedTotal reports how many global slots have been reserved this run.
 func (sm *SessionManager) PostedTotal() int {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-	return sm.postedTotal
+	return sm.global.PostedTotal()
+}
+
+func (sm *SessionManager) sessionBudgetLocked() int {
+	if sm.sessionBudgetOverride > 0 {
+		return sm.sessionBudgetOverride
+	}
+	if sm.cfg.Safeguards.MaxMessagesPerSession > 0 {
+		return sm.cfg.Safeguards.MaxMessagesPerSession
+	}
+	return sm.cfg.Safeguards.MaxMessagesPerRun
 }
 
 // fileExists reports whether path exists (used for the kill-switch check).
