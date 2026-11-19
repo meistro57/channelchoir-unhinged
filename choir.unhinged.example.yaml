@@ -18,7 +18,7 @@ discord:
 
 ollama:
   base_url: http://localhost:11434
-  model: qwen3:30b-a3b
+  model: dolphin-mistral:latest
   temperature: 1.2
   num_predict: 80
   timeout_seconds: 120
