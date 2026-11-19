@@ -34,6 +34,8 @@ conductor:
   speak_threshold: -1.0   # (4) everyone always answers
   voices_per_tick: -1     # (1) ALL eligible voices speak, not one winner
   bot_to_bot: true        # allow choir echoes to trigger further replies
+  mode: autonomous        # autonomous | human_gated
+  recent_responses: 20    # bounded dedup history (0 = off)
   trigger_weight: 0.35
   direct_address_boost: 2.0
   jitter: 0.4
@@ -48,3 +50,9 @@ safeguards:
   max_messages_per_minute: 20    # post rate cap inside a session
   max_runtime_seconds: 3600
   kill_switch_path: kill-switch
+
+controls:
+  enabled: false            # turn on !choir only after wiring an operator surface
+  prefix: "!choir"
+  operators:                # Discord user IDs allowed to run control commands
+    - "292072807553302529"  # Meistro / Mark

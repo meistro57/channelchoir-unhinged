@@ -17,6 +17,7 @@ type Config struct {
 	Ollama     OllamaConfig     `yaml:"ollama"`
 	Conductor  ConductorConfig  `yaml:"conductor"`
 	Safeguards SafeguardsConfig `yaml:"safeguards"`
+	Controls   ControlsConfig   `yaml:"controls"`
 }
 
 type DiscordConfig struct {
@@ -84,6 +85,18 @@ type ConductorConfig struct {
 	// intentional self-conversation, always bounded by the session budget.
 	BotToBot bool `yaml:"bot_to_bot"`
 
+	// Mode selects the operating posture:
+	//   "autonomous" — choir messages may chain replies until limits stop them.
+	//   "human_gated" — once a conversation segment ends, a genuine human
+	//                  message is required before the choir continues.
+	// Defaults to "autonomous". Neither mode can override process limits.
+	Mode string `yaml:"mode"`
+
+	// RecentResponses is the size of the bounded dedup history used to stop
+	// identical/near-identical lines from circulating between personas.
+	// <= 0 disables dedup. Default 0 (off).
+	RecentResponses int `yaml:"recent_responses"`
+
 	// Burst configures rate-limit stress mode.
 	Burst BurstConfig `yaml:"burst"`
 }
@@ -119,6 +132,20 @@ type SafeguardsConfig struct {
 	// KillSwitchPath is a file path. While the file EXISTS the choir will not
 	// post. Create it to kill output instantly from outside the process.
 	KillSwitchPath string `yaml:"kill_switch_path"`
+}
+
+// ControlsConfig governs the !choir control interface. Commands that touch
+// safety settings are restricted to Operators.
+type ControlsConfig struct {
+	// Enabled turns the !choir command interface on. Default false.
+	Enabled bool `yaml:"enabled"`
+
+	// Prefix is the command prefix. Default "!choir".
+	Prefix string `yaml:"prefix"`
+
+	// Operators is the allowlist of Discord user IDs permitted to run control
+	// commands. Empty = nobody (commands disabled, safety-safe).
+	Operators []string `yaml:"operators"`
 }
 
 func Load(path string) (*Config, error) {
@@ -197,6 +224,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Safeguards.MaxRuntimeSeconds == 0 {
 		c.Safeguards.MaxRuntimeSeconds = 3600
+	}
+	if c.Conductor.Mode == "" {
+		c.Conductor.Mode = "autonomous"
+	}
+	if c.Controls.Prefix == "" {
+		c.Controls.Prefix = "!choir"
 	}
 	if c.Safeguards.KillSwitchPath == "" {
 		c.Safeguards.KillSwitchPath = "kill-switch" // relative to CWD

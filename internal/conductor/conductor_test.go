@@ -32,6 +32,8 @@ func newTestConductor(cfg *config.Config) *Conductor {
 		rng:       rand.New(rand.NewSource(1)),
 		choir:     discordio.NewChoirWebhooks(voiceURLs(unhingedVoices())),
 		sessions:  NewSessionManager(cfg),
+		controls:  NewControls(cfg),
+		dedup:     NewDedup(cfg.Conductor.RecentResponses),
 	}
 }
 

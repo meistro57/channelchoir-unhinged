@@ -41,6 +41,13 @@ type Conductor struct {
 	// point, shuts up.
 	sessions *SessionManager
 
+	// controls is the !choir dashboard (chaos, participation, pause, bot-to-bot)
+	// and its auth layer.
+	controls *Controls
+
+	// dedup suppresses identical/near-identical lines circling between personas.
+	dedup *Dedup
+
 	transcript []line
 	turn       int
 	lastSpoke  map[string]int
@@ -76,6 +83,8 @@ func New(cfg *config.Config, voices []*persona.Persona, dc *discordio.Client, mo
 		dryRun:    dryRun,
 		choir:     discordio.NewChoirWebhooks(urls),
 		sessions:  NewSessionManager(cfg),
+		controls:  NewControls(cfg),
+		dedup:     NewDedup(cfg.Conductor.RecentResponses),
 		lastSpoke: map[string]int{},
 	}
 }
@@ -158,6 +167,16 @@ func (c *Conductor) tick(ctx context.Context) error {
 			continue
 		}
 		origin := discordio.Classify(m, c.choir)
+		// A control command is handled before it is recorded as dialogue.
+		if origin == discordio.OriginHuman {
+			if resp, ok := c.controls.Parse(m.Content, m.Author.ID, m.Author.Bot); ok {
+				log.Printf("control [%s]: %s", m.Author.ID, m.Content)
+				if resp != "" {
+					_ = c.postControlReply(ctx, m.Author.ID, resp)
+				}
+				continue
+			}
+		}
 		// Feed every inbound message into the session tracker so origins are
 		// accounted for, even if the transcript records them below.
 		c.sessions.NoteInbound(m, c.choir)
@@ -169,6 +188,11 @@ func (c *Conductor) tick(ctx context.Context) error {
 	}
 
 	if len(c.transcript) == 0 {
+		return nil
+	}
+
+	// Paused: the dashboard has silenced the choir until resume.
+	if c.controls.IsPaused() {
 		return nil
 	}
 
@@ -187,11 +211,15 @@ func (c *Conductor) tick(ctx context.Context) error {
 
 	last := c.transcript[len(c.transcript)-1]
 
-	// Bot-to-bot gate: if the last thing said was our own echo and bot-to-bot
-	// is disabled, do not self-reply. Choir messages stay in the transcript
-	// (for context) but do not trigger generation.
-	if last.origin == discordio.OriginChoir && !c.cfg.Conductor.BotToBot {
-		return nil
+	// Bot-to-bot gate (and human-gated mode): decide whether the choir may
+	// reply to its own echo. In "human_gated" mode the choir only ever speaks in
+	// response to a human/external message, never to its own output. In
+	// "autonomous" mode the bot_to_bot flag governs it.
+	botToBot := c.controls.BotToBotEnabled()
+	if last.origin == discordio.OriginChoir {
+		if c.cfg.Conductor.Mode == "human_gated" || !botToBot {
+			return nil
+		}
 	}
 
 	// UNHINGED change (1): kill the single-winner rule — N voices speak.
@@ -240,6 +268,9 @@ func (c *Conductor) chooseMany(last line) []*persona.Persona {
 	for _, p := range c.voices {
 		if strings.EqualFold(p.Name, last.speaker) {
 			continue // a voice never replies to itself (hard-won upstream rule)
+		}
+		if c.controls.IsExcluded(p.Name) {
+			continue // operator removed this persona from participation
 		}
 
 		// UNHINGED (3): cooldown_turns <= 0 = no sit-out.
@@ -332,6 +363,14 @@ func (c *Conductor) perform(ctx context.Context, p *persona.Persona) error {
 		return nil
 	}
 
+	// Duplicate suppression: refuse to post a line that is identical or
+	// near-identical to something recently said, so phrases cannot circulate
+	// between personas forever.
+	if c.dedup.IsDuplicate(text) {
+		log.Printf("%s produced a duplicate line — suppressed", p.Name)
+		return nil
+	}
+
 	if c.dryRun {
 		log.Printf("[dry-run] %s: %s", p.Name, text)
 	} else {
@@ -340,9 +379,10 @@ func (c *Conductor) perform(ctx context.Context, p *persona.Persona) error {
 		}
 	}
 
-	// Commit records the speaker. The budget slot was already consumed by
-	// Reserve; a failed send still counts (fail-stop, never runaway).
+	// Commit records the speaker AND the dedup history. The budget slot was
+	// already consumed by Reserve; a failed send still counts (fail-stop).
 	c.sessions.Commit(p.Name)
+	c.dedup.Record(text)
 	c.record(p.Name, text, discordio.OriginChoir)
 	return nil
 }
@@ -377,6 +417,15 @@ func (c *Conductor) renderTranscript() string {
 	}
 	b.WriteString("\nWrite the next message.")
 	return b.String()
+}
+
+// postControlReply surfaces a control-command response. The read-only bot token
+// cannot SEND messages; until a dedicated operator-facing channel is wired,
+// responses are logged. In dry-run this is the only behaviour; live surface is
+// a Milestone-2 follow-up decision (DM to the operator or a webhook echo).
+func (c *Conductor) postControlReply(ctx context.Context, authorID, resp string) error {
+	log.Printf("control reply to %s: %s", authorID, resp)
+	return nil
 }
 
 func (c *Conductor) systemPrompt(p *persona.Persona) string {
