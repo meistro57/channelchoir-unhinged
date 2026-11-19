@@ -55,6 +55,10 @@ type Conductor struct {
 	restUntil  time.Time
 
 	lastMessageID string
+
+	// Chamber identity (empty for a standalone single-channel conductor).
+	chamberName string
+	chamberID   string
 }
 
 type line struct {
@@ -66,7 +70,10 @@ type line struct {
 // isHuman reports whether a transcript line came from a real person.
 func (l line) isHuman() bool { return l.origin == discordio.OriginHuman }
 
-func New(cfg *config.Config, voices []*persona.Persona, dc *discordio.Client, model *llm.Client, dryRun bool) *Conductor {
+// New builds a conductor. An optional shared *Global may be passed to stack
+// this conductor's session budget on a process-wide ceiling; omit it for a
+// standalone (single-chamber) conductor with its own private Global.
+func New(cfg *config.Config, voices []*persona.Persona, dc *discordio.Client, model *llm.Client, dryRun bool, shared ...*Global) *Conductor {
 	urls := make([]string, 0, len(voices))
 	for _, p := range voices {
 		if p.WebhookURL != "" {
@@ -82,7 +89,7 @@ func New(cfg *config.Config, voices []*persona.Persona, dc *discordio.Client, mo
 		rng:       rand.New(rand.NewSource(time.Now().UnixNano())),
 		dryRun:    dryRun,
 		choir:     discordio.NewChoirWebhooks(urls),
-		sessions:  NewSessionManager(cfg),
+		sessions:  newSessionManagerFor(cfg, shared),
 		controls:  NewControls(cfg),
 		dedup:     NewDedup(cfg.Conductor.RecentResponses),
 		lastSpoke: map[string]int{},

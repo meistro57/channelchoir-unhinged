@@ -29,6 +29,10 @@ type Controls struct {
 	botToBot   *bool           // nil = use config default
 	chaosLevel int             // 0..5, influences voices_per_tick / jitter at runtime
 	excluded   map[string]bool // persona names excluded from participation
+
+	// chamberName identifies the chamber these controls belong to (empty for a
+	// standalone single-channel conductor).
+	chamberName string
 }
 
 func NewControls(cfg *config.Config) *Controls {
@@ -144,9 +148,56 @@ func (c *Controls) Parse(content, authorID string, isBot bool) (string, bool) {
 		return c.setPersona(args[1:]), true
 	case "limit":
 		return c.setLimit(args[1:]), true
+	case "chambers":
+		return c.listChambers(), true
+	case "chamber":
+		return c.setChamberTarget(args[1:]), true
 	default:
 		return "unknown command: " + args[0], true
 	}
+}
+
+// SetChamberName labels these controls with the chamber they belong to.
+func (c *Controls) SetChamberName(name string) {
+	c.mu.Lock()
+	c.chamberName = name
+	c.mu.Unlock()
+}
+
+// ChamberName reports the chamber label (empty for standalone).
+func (c *Controls) ChamberName() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.chamberName
+}
+
+// listChambers reports this chamber's identity. Cross-process chamber listing
+// is an orchestrator-level concern; from within a chamber we report self plus
+// the configured chamber count when known.
+func (c *Controls) listChambers() string {
+	name := c.ChamberName()
+	if name == "" {
+		return "chamber: (standalone)"
+	}
+	return "chamber: " + name
+}
+
+// setChamberTarget handles "chamber <name> [chaos N]". Because each chamber
+// runs its own conductor and receives only its own channel's messages, a
+// cross-chamber command is routed by the orchestrator. From within a single
+// chamber we only honour commands targeting ourselves.
+func (c *Controls) setChamberTarget(args []string) string {
+	if len(args) == 0 {
+		return "chamber <name> [chaos 0-5]. This chamber: " + c.ChamberName()
+	}
+	name := args[0]
+	if name != c.ChamberName() {
+		return "chamber " + name + " is not this chamber (cross-chamber routing is orchestrator-level)"
+	}
+	if len(args) >= 3 && strings.EqualFold(args[1], "chaos") {
+		return c.setChaos([]string{args[2]})
+	}
+	return c.status()
 }
 
 func (c *Controls) setPaused(v bool) {

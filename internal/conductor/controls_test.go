@@ -130,6 +130,31 @@ func TestControls_UnknownCommand(t *testing.T) {
 	}
 }
 
+func TestControls_ChambersAndChamberTarget(t *testing.T) {
+	c := NewControls(cfgWithControls(true, []string{"mark"}))
+	c.SetChamberName("choir-test-cell")
+
+	resp, ok := c.Parse("!choir chambers", "mark", false)
+	if !ok || resp != "chamber: choir-test-cell" {
+		t.Fatalf("chambers = %q (ok=%v), want chamber listing", resp, ok)
+	}
+
+	// Targeting self with a chaos set works.
+	resp, _ = c.Parse("!choir chamber choir-test-cell chaos 5", "mark", false)
+	if resp != "chaos set to 5" {
+		t.Fatalf("chamber self-chaos = %q, want chaos set to 5", resp)
+	}
+	if c.ChaosLevel() != 5 {
+		t.Fatalf("chaos = %d, want 5", c.ChaosLevel())
+	}
+
+	// Targeting another chamber is refused (cross-chamber routing is orchestrator-level).
+	resp, _ = c.Parse("!choir chamber other-cell chaos 5", "mark", false)
+	if resp == "chaos set to 5" {
+		t.Fatalf("cross-chamber chaos must not be silently applied: %q", resp)
+	}
+}
+
 func TestControls_LimitIsReadOnly(t *testing.T) {
 	c := NewControls(cfgWithControls(true, []string{"mark"}))
 	resp, _ := c.Parse("!choir limit", "mark", false)

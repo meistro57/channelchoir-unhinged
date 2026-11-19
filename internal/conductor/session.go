@@ -100,6 +100,15 @@ func NewSessionManagerShared(cfg *config.Config, g *Global) *SessionManager {
 	return &SessionManager{cfg: cfg, global: g}
 }
 
+// newSessionManagerFor returns a manager backed by the first shared *Global in
+// the variadic slice, or a private one when none is supplied.
+func newSessionManagerFor(cfg *config.Config, shared []*Global) *SessionManager {
+	if len(shared) > 0 && shared[0] != nil {
+		return NewSessionManagerShared(cfg, shared[0])
+	}
+	return NewSessionManager(cfg)
+}
+
 // Global returns the shared ceiling backing this manager (never nil).
 func (sm *SessionManager) Global() *Global { return sm.global }
 

@@ -45,11 +45,25 @@ func main() {
 		&http.Client{Timeout: cfg.Ollama.Timeout()},
 	)
 
-	c := conductor.New(cfg, voices, dc, model, *dryRun)
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Multi-chamber mode: when chambers are configured, run them under one
+	// orchestrator sharing a single process-wide ceiling. Otherwise fall back
+	// to the single-channel conductor (backward compatible).
+	if len(cfg.Chambers) > 0 {
+		orch, err := conductor.NewOrchestrator(cfg, voices, dc, model, *dryRun)
+		if err != nil {
+			log.Fatalf("orchestrator: %v", err)
+		}
+		if err := orch.Run(ctx); err != nil {
+			log.Fatalf("orchestrator stopped: %v", err)
+		}
+		log.Println("choir stopped cleanly")
+		return
+	}
+
+	c := conductor.New(cfg, voices, dc, model, *dryRun)
 	if err := c.Run(ctx); err != nil {
 		log.Fatalf("choir stopped: %v", err)
 	}
