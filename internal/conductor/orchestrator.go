@@ -69,6 +69,15 @@ func NewOrchestrator(cfg *config.Config, allVoices []*persona.Persona, dc *disco
 		c.chamberName = cc.Name
 		c.chamberID = cc.ChannelID
 		c.controls.SetChamberName(cc.Name)
+		// Thread the per-chamber overrides so tick/pacing use the chamber's own
+		// mode and session budget, not the shared config.
+		if cc.Mode != "" {
+			c.chamberMode = cc.Mode
+		}
+		if cc.MaxMessagesPerSession > 0 {
+			c.chamberSessionBudget = cc.MaxMessagesPerSession
+			c.sessions.SetSessionBudget(cc.MaxMessagesPerSession)
+		}
 		o.chambers = append(o.chambers, c)
 	}
 

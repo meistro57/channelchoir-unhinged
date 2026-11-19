@@ -59,6 +59,10 @@ type Conductor struct {
 	// Chamber identity (empty for a standalone single-channel conductor).
 	chamberName string
 	chamberID   string
+
+	// Per-chamber overrides (empty/zero = use the shared config).
+	chamberMode          string
+	chamberSessionBudget int
 }
 
 type line struct {
@@ -69,6 +73,27 @@ type line struct {
 
 // isHuman reports whether a transcript line came from a real person.
 func (l line) isHuman() bool { return l.origin == discordio.OriginHuman }
+
+// channelIDFor returns this conductor's assigned channel ID: the chamber's own
+// ID in multi-chamber mode, falling back to the single-channel config ID for a
+// standalone conductor. The poll loop must ALWAYS use this, never the global
+// config ID directly, or every chamber would read the same channel.
+func (c *Conductor) channelIDFor() string {
+	if c.chamberID != "" {
+		return c.chamberID
+	}
+	return c.cfg.Discord.ChannelID
+}
+
+// modeFor returns this conductor's operating mode: the chamber's own mode in
+// multi-chamber mode, falling back to the shared config mode for a standalone
+// conductor.
+func (c *Conductor) modeFor() string {
+	if c.chamberMode != "" {
+		return c.chamberMode
+	}
+	return c.cfg.Conductor.Mode
+}
 
 // New builds a conductor. An optional shared *Global may be passed to stack
 // this conductor's session budget on a process-wide ceiling; omit it for a
@@ -103,12 +128,12 @@ func (c *Conductor) Run(ctx context.Context) error {
 	}
 
 	log.Printf("choir is live: %d voices, channel %s, model %s",
-		len(c.voices), c.cfg.Discord.ChannelID, c.cfg.Ollama.Model)
+		len(c.voices), c.channelIDFor(), c.cfg.Ollama.Model)
 	ch := c.chaos()
 	log.Printf("CHAOS level=%d: voices=%d..%d, jitter=%.1f, delay=%d-%ds, threshold=%.1f, bot2bot_eager=%.1f, mode=%s, bot_to_bot=%v",
 		c.controls.ChaosLevel(), ch.MinVoices, ch.MaxVoices, ch.Jitter,
 		ch.MinDelay, ch.MaxDelay, ch.Threshold, ch.BotToBotEagerness,
-		c.cfg.Conductor.Mode, c.controls.BotToBotEnabled())
+		c.modeFor(), c.controls.BotToBotEnabled())
 	log.Printf("SAFEGUARDS: allowlist=%v, guilds=%v, max_messages=%d, max_per_min=%d, max_runtime=%ds, kill_switch=%q",
 		c.cfg.Discord.AllowedChannels, c.cfg.Discord.AllowedGuilds,
 		c.cfg.Safeguards.MaxMessagesPerRun, c.cfg.Safeguards.MaxMessagesPerMinute,
@@ -153,7 +178,7 @@ func (c *Conductor) chaos() ChaosParams {
 // seek jumps to the present so the choir doesn't wake up and start replying to
 // a month of backlog.
 func (c *Conductor) seek(ctx context.Context) error {
-	msgs, err := c.discord.FetchAfter(ctx, c.cfg.Discord.ChannelID, "", 1)
+	msgs, err := c.discord.FetchAfter(ctx, c.channelIDFor(), "", 1)
 	if err != nil {
 		return err
 	}
@@ -169,7 +194,7 @@ func (c *Conductor) tick(ctx context.Context) error {
 		return nil
 	}
 
-	msgs, err := c.discord.FetchAfter(ctx, c.cfg.Discord.ChannelID, c.lastMessageID, 50)
+	msgs, err := c.discord.FetchAfter(ctx, c.channelIDFor(), c.lastMessageID, 50)
 	if err != nil {
 		return err
 	}
@@ -231,7 +256,7 @@ func (c *Conductor) tick(ctx context.Context) error {
 	botToBot := c.controls.BotToBotEnabled()
 	ch := c.chaos()
 	if last.origin == discordio.OriginChoir {
-		if c.cfg.Conductor.Mode == "human_gated" || !botToBot {
+		if c.modeFor() == "human_gated" || !botToBot {
 			return nil
 		}
 		// Chaos-driven continuation: below chaos 5, a chain is not guaranteed;
