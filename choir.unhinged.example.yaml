@@ -8,10 +8,13 @@
 
 discord:
   bot_token: ${DISCORD_BOT_TOKEN}       # read-only; voices post via webhooks
-  channel_id: "000000000000000000"
+  guild_id: "1572664667455619175"   # lab guild (pin this for live deployment)
+  channel_id: "1572998079291068437" # choir-test-cell (Firing Range)
   poll_seconds: 2
   allowed_channels:                     # MANDATORY. UNHINGED refuses to start
-    - "000000000000000000"              # without an explicit allowlist.
+    - "1572998079291068437"            # without an explicit allowlist.
+  allowed_guilds:                       # optional: pin to the lab guild
+    - "1572664667455619175"
 
 ollama:
   base_url: http://localhost:11434
@@ -30,6 +33,7 @@ conductor:
   max_delay_seconds: 1
   speak_threshold: -1.0   # (4) everyone always answers
   voices_per_tick: -1     # (1) ALL eligible voices speak, not one winner
+  bot_to_bot: true        # allow choir echoes to trigger further replies
   trigger_weight: 0.35
   direct_address_boost: 2.0
   jitter: 0.4
@@ -39,6 +43,8 @@ conductor:
     window_millis: 1000
 
 safeguards:
-  max_messages_per_run: 500
+  max_messages_per_run: 500      # process-lifetime absolute ceiling
+  max_messages_per_session: 50   # per-conversation budget (resets on human)
+  max_messages_per_minute: 20    # post rate cap inside a session
   max_runtime_seconds: 3600
   kill_switch_path: kill-switch

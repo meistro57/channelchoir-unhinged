@@ -62,3 +62,37 @@ func TestDefaultsNeverDisableSafeguards(t *testing.T) {
 		t.Fatalf("max_runtime_seconds must default to a hard non-zero value")
 	}
 }
+
+func TestValidateRejectsGuildOutsideAllowlist(t *testing.T) {
+	c := Config{
+		Discord: DiscordConfig{
+			BotToken:        "tok",
+			ChannelID:       "111",
+			GuildID:         "999",
+			AllowedChannels: []string{"111"},
+			AllowedGuilds:   []string{"111"},
+		},
+		Conductor: ConductorConfig{MinDelaySeconds: 0, MaxDelaySeconds: 1},
+	}
+	c.applyDefaults()
+	if err := c.validate(); err == nil {
+		t.Fatalf("expected guild outside allowlist to be rejected")
+	}
+}
+
+func TestValidateAcceptsGuildInAllowlist(t *testing.T) {
+	c := Config{
+		Discord: DiscordConfig{
+			BotToken:        "tok",
+			ChannelID:       "111",
+			GuildID:         "111",
+			AllowedChannels: []string{"111"},
+			AllowedGuilds:   []string{"111"},
+		},
+		Conductor: ConductorConfig{MinDelaySeconds: 0, MaxDelaySeconds: 1},
+	}
+	c.applyDefaults()
+	if err := c.validate(); err != nil {
+		t.Fatalf("expected guild in allowlist to be accepted: %v", err)
+	}
+}

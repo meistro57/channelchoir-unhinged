@@ -6,9 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
-	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/meistro57/channelchoir/internal/config"
@@ -22,15 +20,26 @@ import (
 //
 // UNHINGED rips out the single-winner, verse cap, cooldowns, threshold, rest,
 // and human-style delays — but KEEPS the hard safety layer (allowlist, message
-// cap, runtime cap, kill switch, no-ping webhooks). Chaos in conversation,
-// discipline in infrastructure.
+// cap, runtime cap, kill switch, no-ping webhooks), now expressed through an
+// origin-aware SessionManager. Chaos in conversation, discipline in
+// infrastructure.
 type Conductor struct {
-	cfg      *config.Config
-	voices   []*persona.Persona
-	discord  *discordio.Client
-	model    *llm.Client
-	rng      *rand.Rand
-	dryRun   bool
+	cfg     *config.Config
+	voices  []*persona.Persona
+	discord *discordio.Client
+	model   *llm.Client
+	rng     *rand.Rand
+	dryRun  bool
+
+	// choir is the set of webhook ids our own voices post through. Used to
+	// tell a choir echo from an external bot, so bot-to-bot replies can be
+	// gated without ever mistaking an outsider for one of us.
+	choir *discordio.ChoirWebhooks
+
+	// sessions owns the active conversation and its hard budget. Every post
+	// across every persona is debited through it, so the choir always, at some
+	// point, shuts up.
+	sessions *SessionManager
 
 	transcript []line
 	turn       int
@@ -39,20 +48,25 @@ type Conductor struct {
 	restUntil  time.Time
 
 	lastMessageID string
-
-	// UNHINGED safety state.
-	mu       sync.Mutex
-	posted   int       // total messages actually posted this run
-	started  time.Time // run start (for runtime cap)
 }
 
 type line struct {
 	speaker string
 	text    string
-	human   bool
+	origin  discordio.Origin
 }
 
+// isHuman reports whether a transcript line came from a real person.
+func (l line) isHuman() bool { return l.origin == discordio.OriginHuman }
+
 func New(cfg *config.Config, voices []*persona.Persona, dc *discordio.Client, model *llm.Client, dryRun bool) *Conductor {
+	urls := make([]string, 0, len(voices))
+	for _, p := range voices {
+		if p.WebhookURL != "" {
+			urls = append(urls, p.WebhookURL)
+		}
+	}
+
 	return &Conductor{
 		cfg:       cfg,
 		voices:    voices,
@@ -60,8 +74,9 @@ func New(cfg *config.Config, voices []*persona.Persona, dc *discordio.Client, mo
 		model:     model,
 		rng:       rand.New(rand.NewSource(time.Now().UnixNano())),
 		dryRun:    dryRun,
+		choir:     discordio.NewChoirWebhooks(urls),
+		sessions:  NewSessionManager(cfg),
 		lastSpoke: map[string]int{},
-		started:   time.Now(),
 	}
 }
 
@@ -73,14 +88,15 @@ func (c *Conductor) Run(ctx context.Context) error {
 
 	log.Printf("choir is live: %d voices, channel %s, model %s",
 		len(c.voices), c.cfg.Discord.ChannelID, c.cfg.Ollama.Model)
-	log.Printf("UNHINGED: voices_per_tick=%d, max_verse=%d, rest=%ds, cooldown=%d, threshold=%.2f, delays=%d-%ds",
+	log.Printf("UNHINGED: voices_per_tick=%d, max_verse=%d, rest=%ds, cooldown=%d, threshold=%.2f, bot_to_bot=%v",
 		c.cfg.Conductor.VoicesPerTick, c.cfg.Conductor.MaxVerse,
 		c.cfg.Conductor.RestSeconds, c.cfg.Conductor.CooldownTurns,
-		c.cfg.Conductor.SpeakThreshold,
-		c.cfg.Conductor.MinDelaySeconds, c.cfg.Conductor.MaxDelaySeconds)
-	log.Printf("SAFEGUARDS: allowlist=%v, max_messages=%d, max_runtime=%ds, kill_switch=%q",
-		c.cfg.Discord.AllowedChannels, c.cfg.Safeguards.MaxMessagesPerRun,
+		c.cfg.Conductor.SpeakThreshold, c.cfg.Conductor.BotToBot)
+	log.Printf("SAFEGUARDS: allowlist=%v, guilds=%v, max_messages=%d, max_per_min=%d, max_runtime=%ds, kill_switch=%q",
+		c.cfg.Discord.AllowedChannels, c.cfg.Discord.AllowedGuilds,
+		c.cfg.Safeguards.MaxMessagesPerRun, c.cfg.Safeguards.MaxMessagesPerMinute,
 		c.cfg.Safeguards.MaxRuntimeSeconds, c.cfg.Safeguards.KillSwitchPath)
+	log.Printf("choir webhooks identified: %d of %d voices", c.choir.Len(), len(c.voices))
 
 	ticker := time.NewTicker(time.Duration(c.cfg.Discord.PollSeconds) * time.Second)
 	defer ticker.Stop()
@@ -96,37 +112,20 @@ func (c *Conductor) Run(ctx context.Context) error {
 				}
 				log.Printf("tick error: %v", err)
 			}
-			if err := c.enforceHardLimits(); err != nil {
-				return err
+			// A hard message cap is terminal: the choir goes silent and stays silent
+			// until the process restarts (or a live operator intervenes).
+			if c.cfg.Safeguards.MaxMessagesPerRun > 0 &&
+				c.sessions.PostedTotal() >= c.cfg.Safeguards.MaxMessagesPerRun {
+				return fmt.Errorf("HARD LIMIT: posted %d messages (cap %d) — halting",
+					c.sessions.PostedTotal(), c.cfg.Safeguards.MaxMessagesPerRun)
 			}
 		}
 	}
 }
 
-// enforceHardLimits returns a terminal error once the message/runtime caps are
-// hit, so the process halts rather than running away.
-func (c *Conductor) enforceHardLimits() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.cfg.Safeguards.MaxMessagesPerRun > 0 && c.posted >= c.cfg.Safeguards.MaxMessagesPerRun {
-		return fmt.Errorf("HARD LIMIT: posted %d messages (cap %d) — halting",
-			c.posted, c.cfg.Safeguards.MaxMessagesPerRun)
-	}
-	if c.cfg.Safeguards.MaxRuntimeSeconds > 0 &&
-		int(time.Since(c.started).Seconds()) >= c.cfg.Safeguards.MaxRuntimeSeconds {
-		return fmt.Errorf("HARD LIMIT: ran %d seconds (cap %d) — halting",
-			int(time.Since(c.started).Seconds()), c.cfg.Safeguards.MaxRuntimeSeconds)
-	}
-	return nil
-}
-
 // killed reports whether the external kill-switch file is present.
 func (c *Conductor) killed() bool {
-	if c.cfg.Safeguards.KillSwitchPath == "" {
-		return false
-	}
-	_, err := os.Stat(c.cfg.Safeguards.KillSwitchPath)
-	return err == nil
+	return fileExists(c.cfg.Safeguards.KillSwitchPath)
 }
 
 // seek jumps to the present so the choir doesn't wake up and start replying to
@@ -158,8 +157,12 @@ func (c *Conductor) tick(ctx context.Context) error {
 		if strings.TrimSpace(m.Content) == "" {
 			continue
 		}
-		c.record(m.Speaker(), m.Content, m.IsHuman())
-		if m.IsHuman() {
+		origin := discordio.Classify(m, c.choir)
+		// Feed every inbound message into the session tracker so origins are
+		// accounted for, even if the transcript records them below.
+		c.sessions.NoteInbound(m, c.choir)
+		c.record(m.Speaker(), m.Content, origin)
+		if origin == discordio.OriginHuman {
 			c.verse = 0
 			c.restUntil = time.Time{}
 		}
@@ -183,6 +186,13 @@ func (c *Conductor) tick(ctx context.Context) error {
 	}
 
 	last := c.transcript[len(c.transcript)-1]
+
+	// Bot-to-bot gate: if the last thing said was our own echo and bot-to-bot
+	// is disabled, do not self-reply. Choir messages stay in the transcript
+	// (for context) but do not trigger generation.
+	if last.origin == discordio.OriginChoir && !c.cfg.Conductor.BotToBot {
+		return nil
+	}
 
 	// UNHINGED change (1): kill the single-winner rule — N voices speak.
 	speakers := c.chooseMany(last)
@@ -252,7 +262,7 @@ func (c *Conductor) chooseMany(last line) []*persona.Persona {
 		if strings.Contains(lowered, strings.ToLower(p.Name)) {
 			score += c.cfg.Conductor.DirectAddressBoost
 		}
-		if last.human {
+		if last.isHuman() {
 			score += 0.3
 		}
 		score += (c.rng.Float64() - 0.5) * 2 * c.cfg.Conductor.Jitter
@@ -289,8 +299,18 @@ func (c *Conductor) chooseMany(last line) []*persona.Persona {
 	return out
 }
 
-// perform waits a near-zero beat (UNHINGED 6), generates, and posts.
+// perform waits a near-zero beat (UNHINGED 6), generates, and posts — only if
+// the session budget still allows it. The budget is checked BEFORE posting and
+// debited AFTER a successful send, so multiple voices selected in one tick can
+// never collectively exceed the remaining allowance.
 func (c *Conductor) perform(ctx context.Context, p *persona.Persona) error {
+	now := time.Now()
+	if err := c.sessions.CanPost(now); err != nil {
+		// Budget exhausted: stop immediately rather than generating text that
+		// can never be posted.
+		return fmt.Errorf("budget: %w", err)
+	}
+
 	delay := c.cfg.Conductor.MinDelaySeconds
 	if spread := c.cfg.Conductor.MaxDelaySeconds - c.cfg.Conductor.MinDelaySeconds; spread > 0 {
 		delay += c.rng.Intn(spread + 1)
@@ -320,15 +340,14 @@ func (c *Conductor) perform(ctx context.Context, p *persona.Persona) error {
 		}
 	}
 
-	c.record(p.Name, text, false)
-
-	c.mu.Lock()
-	c.posted++
-	c.mu.Unlock()
+	// Debit only after a successful post (or a dry-run equivalent), so the
+	// budget accurately reflects what actually went out.
+	c.sessions.Debit(time.Now(), p.Name)
+	c.record(p.Name, text, discordio.OriginChoir)
 	return nil
 }
 
-func (c *Conductor) record(speaker, text string, human bool) {
+func (c *Conductor) record(speaker, text string, origin discordio.Origin) {
 	if n := len(c.transcript); n > 0 {
 		prev := c.transcript[n-1]
 		if prev.speaker == speaker && prev.text == text {
@@ -336,13 +355,13 @@ func (c *Conductor) record(speaker, text string, human bool) {
 		}
 	}
 
-	c.transcript = append(c.transcript, line{speaker: speaker, text: text, human: human})
+	c.transcript = append(c.transcript, line{speaker: speaker, text: text, origin: origin})
 	if len(c.transcript) > c.cfg.Conductor.TranscriptSize {
 		c.transcript = c.transcript[len(c.transcript)-c.cfg.Conductor.TranscriptSize:]
 	}
 
 	c.turn++
-	if human {
+	if origin == discordio.OriginHuman {
 		c.verse = 0
 	} else {
 		c.verse++

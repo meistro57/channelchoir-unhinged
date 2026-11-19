@@ -23,6 +23,7 @@ type DiscordConfig struct {
 	// BotToken is only used to READ the channel. The voices post through
 	// webhooks, which is how they get their own names and avatars.
 	BotToken    string `yaml:"bot_token"`
+	GuildID     string `yaml:"guild_id"`
 	ChannelID   string `yaml:"channel_id"`
 	PollSeconds int    `yaml:"poll_seconds"`
 
@@ -30,6 +31,11 @@ type DiscordConfig struct {
 	// in. UNHINGED refuses to START unless this is explicitly set — chaos must
 	// be scoped to a known disposable test cell, never the wider guild.
 	AllowedChannels []string `yaml:"allowed_channels"`
+
+	// AllowedGuilds is the set of guild IDs the choir may operate in. Empty
+	// means "any guild" (kept for dry-run/mocked tests); live deployment
+	// should always pin this to the lab guild.
+	AllowedGuilds []string `yaml:"allowed_guilds"`
 }
 
 type OllamaConfig struct {
@@ -73,6 +79,11 @@ type ConductorConfig struct {
 	// single winner. <= 0 means "all eligible voices" (machine-gun).
 	VoicesPerTick int `yaml:"voices_per_tick"`
 
+	// BotToBot enables choir-generated messages to trigger further replies.
+	// OFF means the choir never replies to its own webhook echoes. ON enables
+	// intentional self-conversation, always bounded by the session budget.
+	BotToBot bool `yaml:"bot_to_bot"`
+
 	// Burst configures rate-limit stress mode.
 	Burst BurstConfig `yaml:"burst"`
 }
@@ -91,6 +102,15 @@ type SafeguardsConfig struct {
 	// MaxMessagesPerRun is the hard global cap on total messages posted before
 	// the choir halts itself. Default 500 if unset (never "off").
 	MaxMessagesPerRun int `yaml:"max_messages_per_run"`
+
+	// MaxMessagesPerMinute caps the post rate inside the session window.
+	// Default 0 = no per-minute cap (the run-level cap still holds).
+	MaxMessagesPerMinute int `yaml:"max_messages_per_minute"`
+
+	// MaxMessagesPerSession caps generated messages within one session.
+	// Resets when a human starts a new session. Default 0 = inherit the
+	// run-level cap (max_messages_per_run).
+	MaxMessagesPerSession int `yaml:"max_messages_per_session"`
 
 	// MaxRuntimeSeconds is the hard cap on how long a run lives before it halts.
 	// Default 3600 (1 hour) if unset (never "off").
@@ -200,6 +220,9 @@ func (c *Config) validate() error {
 	}
 	if c.Conductor.MaxDelaySeconds < c.Conductor.MinDelaySeconds {
 		return fmt.Errorf("conductor.max_delay_seconds must be >= min_delay_seconds")
+	}
+	if c.Discord.GuildID != "" && len(c.Discord.AllowedGuilds) > 0 && !contains(c.Discord.AllowedGuilds, c.Discord.GuildID) {
+		return fmt.Errorf("discord.guild_id %q is not in discord.allowed_guilds %v", c.Discord.GuildID, c.Discord.AllowedGuilds)
 	}
 	return nil
 }

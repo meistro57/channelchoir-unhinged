@@ -22,11 +22,14 @@ type Message struct {
 	ID        string `json:"id"`
 	Content   string `json:"content"`
 	WebhookID string `json:"webhook_id"`
-	Author    struct {
-		ID       string `json:"id"`
-		Username string `json:"username"`
-		Bot      bool   `json:"bot"`
-	} `json:"author"`
+	Author    Author `json:"author"`
+}
+
+// Author is the author slice of a Discord message.
+type Author struct {
+	ID       string `json:"id"`
+	Username string `json:"username"`
+	Bot      bool   `json:"bot"`
 }
 
 // IsHuman reports whether this message came from an actual person. Webhook
