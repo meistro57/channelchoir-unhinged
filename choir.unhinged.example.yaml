@@ -56,3 +56,4 @@ controls:
   prefix: "!choir"
   operators:                # Discord user IDs allowed to run control commands
     - "292072807553302529"  # Meistro / Mark
+  control_webhook_url: ""   # DEDICATED control webhook (never a persona webhook); empty = log-only

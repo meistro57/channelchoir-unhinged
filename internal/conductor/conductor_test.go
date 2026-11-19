@@ -37,6 +37,13 @@ func newTestConductor(cfg *config.Config) *Conductor {
 	}
 }
 
+// setChaos adjusts the dashboard chaos level directly for tests.
+func setChaos(c *Conductor, n int) {
+	c.controls.mu.Lock()
+	c.controls.chaosLevel = n
+	c.controls.mu.Unlock()
+}
+
 func voiceURLs(vs []*persona.Persona) []string {
 	out := make([]string, 0, len(vs))
 	for _, p := range vs {
@@ -48,8 +55,9 @@ func voiceURLs(vs []*persona.Persona) []string {
 }
 
 // Existing chooseMany tests, updated for origin-based lines.
-func TestChooseMany_AllVoicesSpeakWhenUncapped(t *testing.T) {
+func TestChooseMany_AllVoicesSpeakWhenUnhinged(t *testing.T) {
 	c := newTestConductor(nil)
+	setChaos(c, 5)
 	last := line{speaker: "someone", text: "hey", origin: discordio.OriginHuman}
 	got := c.chooseMany(last)
 	if len(got) != len(unhingedVoices()) {
@@ -57,12 +65,13 @@ func TestChooseMany_AllVoicesSpeakWhenUncapped(t *testing.T) {
 	}
 }
 
-func TestChooseMany_CapsAtN(t *testing.T) {
-	c := newTestConductor(&config.Config{Conductor: config.ConductorConfig{VoicesPerTick: 2, SpeakThreshold: -1, Jitter: 0.001, MaxVerse: -1}})
+func TestChooseMany_PoliteIsSingleVoice(t *testing.T) {
+	c := newTestConductor(nil)
+	setChaos(c, 0)
 	last := line{speaker: "someone", text: "hey", origin: discordio.OriginHuman}
 	got := c.chooseMany(last)
-	if len(got) != 2 {
-		t.Fatalf("expected 2 voices, got %d", len(got))
+	if len(got) != 1 {
+		t.Fatalf("chaos 0 should pick exactly 1 voice, got %d", len(got))
 	}
 }
 
@@ -78,6 +87,7 @@ func TestChooseMany_NeverRepliesToSelf(t *testing.T) {
 
 func TestChooseMany_ZeroCooldownNoSitOut(t *testing.T) {
 	c := newTestConductor(nil)
+	setChaos(c, 5)
 	c.turn = 5
 	c.lastSpoke["Troll"] = 5
 	last := line{speaker: "human", text: "hi", origin: discordio.OriginHuman}

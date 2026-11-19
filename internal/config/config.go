@@ -146,6 +146,11 @@ type ControlsConfig struct {
 	// Operators is the allowlist of Discord user IDs permitted to run control
 	// commands. Empty = nobody (commands disabled, safety-safe).
 	Operators []string `yaml:"operators"`
+
+	// ControlWebhookURL is a DEDICATED webhook (never a persona webhook) that
+	// surfaces [CHOIR ...] control/status/error notices to operators. Empty =
+	// control replies are log-only.
+	ControlWebhookURL string `yaml:"control_webhook_url"`
 }
 
 func Load(path string) (*Config, error) {

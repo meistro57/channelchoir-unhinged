@@ -97,10 +97,11 @@ func (c *Conductor) Run(ctx context.Context) error {
 
 	log.Printf("choir is live: %d voices, channel %s, model %s",
 		len(c.voices), c.cfg.Discord.ChannelID, c.cfg.Ollama.Model)
-	log.Printf("UNHINGED: voices_per_tick=%d, max_verse=%d, rest=%ds, cooldown=%d, threshold=%.2f, bot_to_bot=%v",
-		c.cfg.Conductor.VoicesPerTick, c.cfg.Conductor.MaxVerse,
-		c.cfg.Conductor.RestSeconds, c.cfg.Conductor.CooldownTurns,
-		c.cfg.Conductor.SpeakThreshold, c.cfg.Conductor.BotToBot)
+	ch := c.chaos()
+	log.Printf("CHAOS level=%d: voices=%d..%d, jitter=%.1f, delay=%d-%ds, threshold=%.1f, bot2bot_eager=%.1f, mode=%s, bot_to_bot=%v",
+		c.controls.ChaosLevel(), ch.MinVoices, ch.MaxVoices, ch.Jitter,
+		ch.MinDelay, ch.MaxDelay, ch.Threshold, ch.BotToBotEagerness,
+		c.cfg.Conductor.Mode, c.controls.BotToBotEnabled())
 	log.Printf("SAFEGUARDS: allowlist=%v, guilds=%v, max_messages=%d, max_per_min=%d, max_runtime=%ds, kill_switch=%q",
 		c.cfg.Discord.AllowedChannels, c.cfg.Discord.AllowedGuilds,
 		c.cfg.Safeguards.MaxMessagesPerRun, c.cfg.Safeguards.MaxMessagesPerMinute,
@@ -135,6 +136,11 @@ func (c *Conductor) Run(ctx context.Context) error {
 // killed reports whether the external kill-switch file is present.
 func (c *Conductor) killed() bool {
 	return fileExists(c.cfg.Safeguards.KillSwitchPath)
+}
+
+// chaos returns the ChaosParams for the current dashboard chaos level.
+func (c *Conductor) chaos() ChaosParams {
+	return chaosFor(c.controls.ChaosLevel())
 }
 
 // seek jumps to the present so the choir doesn't wake up and start replying to
@@ -216,8 +222,14 @@ func (c *Conductor) tick(ctx context.Context) error {
 	// response to a human/external message, never to its own output. In
 	// "autonomous" mode the bot_to_bot flag governs it.
 	botToBot := c.controls.BotToBotEnabled()
+	ch := c.chaos()
 	if last.origin == discordio.OriginChoir {
 		if c.cfg.Conductor.Mode == "human_gated" || !botToBot {
+			return nil
+		}
+		// Chaos-driven continuation: below chaos 5, a chain is not guaranteed;
+		// high eagerness means the choir keeps talking to itself.
+		if c.rng.Float64() > ch.BotToBotEagerness {
 			return nil
 		}
 	}
@@ -257,6 +269,7 @@ func (c *Conductor) tick(ctx context.Context) error {
 // chooseMany scores every voice against the last thing said and returns up to
 // VoicesPerTick speakers (all eligible when VoicesPerTick <= 0).
 func (c *Conductor) chooseMany(last line) []*persona.Persona {
+	ch := c.chaos()
 	lowered := strings.ToLower(last.text)
 
 	type scored struct {
@@ -296,10 +309,10 @@ func (c *Conductor) chooseMany(last line) []*persona.Persona {
 		if last.isHuman() {
 			score += 0.3
 		}
-		score += (c.rng.Float64() - 0.5) * 2 * c.cfg.Conductor.Jitter
+		score += (c.rng.Float64() - 0.5) * 2 * ch.Jitter
 
-		// UNHINGED (4): threshold <= 0 = always eligible.
-		if c.cfg.Conductor.SpeakThreshold > 0 && score < c.cfg.Conductor.SpeakThreshold {
+		// Threshold scales with chaos: negative = eager (everyone answers).
+		if ch.Threshold > 0 && score < ch.Threshold {
 			continue
 		}
 		pool = append(pool, scored{p, score})
@@ -318,10 +331,7 @@ func (c *Conductor) chooseMany(last line) []*persona.Persona {
 		}
 	}
 
-	limit := c.cfg.Conductor.VoicesPerTick
-	if limit <= 0 || limit > len(pool) {
-		limit = len(pool)
-	}
+	limit := ch.voicesForTick(c.rng, len(pool))
 
 	out := make([]*persona.Persona, 0, limit)
 	for _, s := range pool[:limit] {
@@ -342,8 +352,9 @@ func (c *Conductor) perform(ctx context.Context, p *persona.Persona) error {
 		return fmt.Errorf("budget: %w", err)
 	}
 
-	delay := c.cfg.Conductor.MinDelaySeconds
-	if spread := c.cfg.Conductor.MaxDelaySeconds - c.cfg.Conductor.MinDelaySeconds; spread > 0 {
+	ch := c.chaos()
+	delay := ch.MinDelay
+	if spread := ch.MaxDelay - ch.MinDelay; spread > 0 {
 		delay += c.rng.Intn(spread + 1)
 	}
 	if delay > 0 {
@@ -419,13 +430,23 @@ func (c *Conductor) renderTranscript() string {
 	return b.String()
 }
 
-// postControlReply surfaces a control-command response. The read-only bot token
-// cannot SEND messages; until a dedicated operator-facing channel is wired,
-// responses are logged. In dry-run this is the only behaviour; live surface is
-// a Milestone-2 follow-up decision (DM to the operator or a webhook echo).
+// postControlReply surfaces control/status/error notices on the DEDICATED
+// control webhook (never a persona webhook). Each notice is prefixed with a
+// [CHOIR ...] tag. When no control webhook is configured (or in dry-run), the
+// notice is logged only.
 func (c *Conductor) postControlReply(ctx context.Context, authorID, resp string) error {
-	log.Printf("control reply to %s: %s", authorID, resp)
-	return nil
+	return c.postControl(ctx, "[CHOIR CONTROL]", resp)
+}
+
+// postControl posts a prefixed [CHOIR ...] notice to the control webhook, or
+// logs it when no webhook is configured.
+func (c *Conductor) postControl(ctx context.Context, tag, msg string) error {
+	line := tag + " " + msg
+	if c.cfg.Controls.ControlWebhookURL == "" || c.dryRun {
+		log.Printf("control: %s", line)
+		return nil
+	}
+	return c.discord.PostWebhook(ctx, c.cfg.Controls.ControlWebhookURL, "Choir Conductor", "", line)
 }
 
 func (c *Conductor) systemPrompt(p *persona.Persona) string {
