@@ -18,6 +18,7 @@ type Config struct {
 	Conductor  ConductorConfig  `yaml:"conductor"`
 	Safeguards SafeguardsConfig `yaml:"safeguards"`
 	Controls   ControlsConfig   `yaml:"controls"`
+	Chambers   []ChamberConfig  `yaml:"chambers"`
 }
 
 type DiscordConfig struct {
@@ -151,6 +152,21 @@ type ControlsConfig struct {
 	// surfaces [CHOIR ...] control/status/error notices to operators. Empty =
 	// control replies are log-only.
 	ControlWebhookURL string `yaml:"control_webhook_url"`
+}
+
+// ChamberConfig is one isolated test chamber (a Discord channel). Each chamber
+// carries its own roster, chaos, mode, limits, and enabled state layered UNDER
+// the process-wide safety ceilings. Enabled=false means the chamber is defined
+// but INACTIVE until Mark approves live activation.
+type ChamberConfig struct {
+	Name                  string   `yaml:"name"`
+	GuildID               string   `yaml:"guild_id"`
+	ChannelID             string   `yaml:"channel_id"`
+	Enabled               bool     `yaml:"enabled"`
+	Personas              []string `yaml:"personas"`                 // persona names, resolved against persona_dir
+	Chaos                 int      `yaml:"chaos"`                    // 0..5
+	Mode                  string   `yaml:"mode"`                     // autonomous | human_gated
+	MaxMessagesPerSession int      `yaml:"max_messages_per_session"` // 0 = inherit global
 }
 
 func Load(path string) (*Config, error) {
