@@ -3,6 +3,7 @@ package conductor
 import (
 	"math/rand"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -118,20 +119,20 @@ func TestWebhookIDFromURL(t *testing.T) {
 	}
 }
 
-// --- Milestone 1: session budget ---
+// --- Milestone 1 verification: atomic reservation + budgets ---
 
 func TestSessionManager_HardMessageCap(t *testing.T) {
 	cfg := &config.Config{Safeguards: config.SafeguardsConfig{MaxMessagesPerRun: 3}}
 	sm := NewSessionManager(cfg)
 	sm.NoteInbound(humanMsg(), nil)
 	for i := 0; i < 3; i++ {
-		if err := sm.CanPost(time.Now()); err != nil {
-			t.Fatalf("post %d should be allowed: %v", i, err)
+		if _, err := sm.Reserve(time.Now()); err != nil {
+			t.Fatalf("reserve %d should be allowed: %v", i, err)
 		}
-		sm.Debit(time.Now(), "Troll")
+		sm.Commit("Troll")
 	}
-	if err := sm.CanPost(time.Now()); err == nil {
-		t.Fatalf("4th post must be blocked by hard cap")
+	if _, err := sm.Reserve(time.Now()); err == nil {
+		t.Fatalf("4th reserve must be blocked by hard cap")
 	}
 	if sm.PostedTotal() != 3 {
 		t.Fatalf("posted total = %d, want 3", sm.PostedTotal())
@@ -144,16 +145,15 @@ func TestSessionManager_PerMinuteCap(t *testing.T) {
 	sm.NoteInbound(humanMsg(), nil)
 	now := time.Now()
 	for i := 0; i < 2; i++ {
-		if err := sm.CanPost(now); err != nil {
-			t.Fatalf("post %d allowed: %v", i, err)
+		if _, err := sm.Reserve(now); err != nil {
+			t.Fatalf("reserve %d allowed: %v", i, err)
 		}
-		sm.Debit(now, "Troll")
 	}
-	if err := sm.CanPost(now); err == nil {
-		t.Fatalf("3rd post in same minute must be blocked")
+	if _, err := sm.Reserve(now); err == nil {
+		t.Fatalf("3rd reserve in same minute must be blocked")
 	}
-	if err := sm.CanPost(now.Add(61 * time.Second)); err != nil {
-		t.Fatalf("post after a minute should be allowed: %v", err)
+	if _, err := sm.Reserve(now.Add(61 * time.Second)); err != nil {
+		t.Fatalf("reserve after a minute should be allowed: %v", err)
 	}
 }
 
@@ -163,13 +163,12 @@ func TestSessionManager_ChoirEchoDoesNotRestartBudget(t *testing.T) {
 	choir := discordio.NewChoirWebhooks([]string{"https://discord.com/api/webhooks/100/x"})
 	sm.NoteInbound(humanMsg(), choir)
 	for i := 0; i < 2; i++ {
-		if err := sm.CanPost(time.Now()); err != nil {
-			t.Fatalf("post %d allowed: %v", i, err)
+		if _, err := sm.Reserve(time.Now()); err != nil {
+			t.Fatalf("reserve %d allowed: %v", i, err)
 		}
-		sm.Debit(time.Now(), "Troll")
 	}
 	sm.NoteInbound(choirMsg(), choir)
-	if err := sm.CanPost(time.Now()); err == nil {
+	if _, err := sm.Reserve(time.Now()); err == nil {
 		t.Fatalf("choir echo must not reset the exhausted budget")
 	}
 }
@@ -180,17 +179,16 @@ func TestSessionManager_HumanRestartsBudget(t *testing.T) {
 	choir := discordio.NewChoirWebhooks([]string{"https://discord.com/api/webhooks/100/x"})
 	sm.NoteInbound(humanMsg(), choir)
 	for i := 0; i < 2; i++ {
-		if err := sm.CanPost(time.Now()); err != nil {
-			t.Fatalf("post %d allowed: %v", i, err)
+		if _, err := sm.Reserve(time.Now()); err != nil {
+			t.Fatalf("reserve %d allowed: %v", i, err)
 		}
-		sm.Debit(time.Now(), "Troll")
 	}
-	if err := sm.CanPost(time.Now()); err == nil {
-		t.Fatalf("budget should be exhausted")
+	if _, err := sm.Reserve(time.Now()); err == nil {
+		t.Fatalf("session budget should be exhausted")
 	}
 	sm.NoteInbound(humanMsg(), choir)
-	if err := sm.CanPost(time.Now()); err != nil {
-		t.Fatalf("fresh human message must reset the budget: %v", err)
+	if _, err := sm.Reserve(time.Now()); err != nil {
+		t.Fatalf("fresh human message must reset the session budget: %v", err)
 	}
 }
 
@@ -200,14 +198,14 @@ func TestSessionManager_KillSwitchBlocks(t *testing.T) {
 	cfg := &config.Config{Safeguards: config.SafeguardsConfig{MaxMessagesPerRun: 100, KillSwitchPath: kill}}
 	sm := NewSessionManager(cfg)
 	sm.NoteInbound(humanMsg(), nil)
-	if err := sm.CanPost(time.Now()); err != nil {
-		t.Fatalf("post should be allowed before kill switch: %v", err)
+	if _, err := sm.Reserve(time.Now()); err != nil {
+		t.Fatalf("reserve should be allowed before kill switch: %v", err)
 	}
 	if err := os.WriteFile(kill, []byte("kill"), 0644); err != nil {
 		t.Fatalf("write kill switch: %v", err)
 	}
-	if err := sm.CanPost(time.Now()); err == nil {
-		t.Fatalf("kill switch present must block posting")
+	if _, err := sm.Reserve(time.Now()); err == nil {
+		t.Fatalf("kill switch present must block reserve")
 	}
 }
 
@@ -216,15 +214,99 @@ func TestSessionManager_SessionRuntimeCap(t *testing.T) {
 	sm := NewSessionManager(cfg)
 	sm.NoteInbound(humanMsg(), nil)
 	s := sm.Active()
-	// 61 seconds after the session started, it must refuse to post.
-	if err := sm.CanPost(s.StartedAt.Add(61 * time.Second)); err == nil {
-		t.Fatalf("session past runtime cap must block posting")
+	if _, err := sm.Reserve(s.StartedAt.Add(61 * time.Second)); err == nil {
+		t.Fatalf("session past runtime cap must block reserve")
 	}
-	// A fresh human message restarts the clock.
 	sm.NoteInbound(humanMsg(), nil)
 	s2 := sm.Active()
-	if err := sm.CanPost(s2.StartedAt.Add(30 * time.Second)); err != nil {
+	if _, err := sm.Reserve(s2.StartedAt.Add(30 * time.Second)); err != nil {
 		t.Fatalf("fresh session should be within its runtime window: %v", err)
+	}
+}
+
+// --- Milestone 1 verification: atomic reservation under concurrency ---
+
+func TestReserve_ConcurrentNeverExceedsCap(t *testing.T) {
+	cfg := &config.Config{Safeguards: config.SafeguardsConfig{MaxMessagesPerRun: 100, MaxMessagesPerSession: 40, MaxMessagesPerMinute: 0}}
+	sm := NewSessionManager(cfg)
+	sm.NoteInbound(humanMsg(), nil)
+
+	const workers = 50
+	const attempts = 4
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	success := 0
+
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for a := 0; a < attempts; a++ {
+				if _, err := sm.Reserve(time.Now()); err == nil {
+					mu.Lock()
+					success++
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	if success != 40 {
+		t.Fatalf("reserved %d slots, want exactly 40 (session budget)", success)
+	}
+	if sm.PostedTotal() != 40 {
+		t.Fatalf("PostedTotal=%d, want 40", sm.PostedTotal())
+	}
+}
+
+func TestReserve_FailedSendStillCounts(t *testing.T) {
+	cfg := &config.Config{Safeguards: config.SafeguardsConfig{MaxMessagesPerRun: 100, MaxMessagesPerSession: 2}}
+	sm := NewSessionManager(cfg)
+	sm.NoteInbound(humanMsg(), nil)
+
+	if _, err := sm.Reserve(time.Now()); err != nil {
+		t.Fatalf("reserve 1: %v", err)
+	}
+	// Simulate a failed post: do nothing (no Commit, no refund path exists).
+	if _, err := sm.Reserve(time.Now()); err != nil {
+		t.Fatalf("reserve 2 should still be allowed: %v", err)
+	}
+	if _, err := sm.Reserve(time.Now()); err == nil {
+		t.Fatalf("reserve 3 must be blocked after 2 reservations")
+	}
+}
+
+func TestReserve_RapidHumanMessagesDoNotResetProcessCap(t *testing.T) {
+	cfg := &config.Config{Safeguards: config.SafeguardsConfig{MaxMessagesPerRun: 5, MaxMessagesPerSession: 2}}
+	sm := NewSessionManager(cfg)
+	choir := discordio.NewChoirWebhooks([]string{"https://discord.com/api/webhooks/100/x"})
+
+	total := 0
+	for i := 0; i < 10; i++ {
+		sm.NoteInbound(humanMsg(), choir)
+		for j := 0; j < 2; j++ {
+			if _, err := sm.Reserve(time.Now()); err == nil {
+				total++
+			} else {
+				break
+			}
+		}
+	}
+
+	if total != 5 {
+		t.Fatalf("total reserved = %d, want exactly 5 (process run cap)", total)
+	}
+	if sm.PostedTotal() != 5 {
+		t.Fatalf("PostedTotal=%d, want 5", sm.PostedTotal())
+	}
+}
+
+func TestSessionManager_NoActiveSessionBlocksReserve(t *testing.T) {
+	cfg := &config.Config{Safeguards: config.SafeguardsConfig{MaxMessagesPerRun: 100}}
+	sm := NewSessionManager(cfg)
+	if _, err := sm.Reserve(time.Now()); err == nil {
+		t.Fatalf("reserve with no active session must fail")
 	}
 }
 

@@ -304,10 +304,10 @@ func (c *Conductor) chooseMany(last line) []*persona.Persona {
 // debited AFTER a successful send, so multiple voices selected in one tick can
 // never collectively exceed the remaining allowance.
 func (c *Conductor) perform(ctx context.Context, p *persona.Persona) error {
-	now := time.Now()
-	if err := c.sessions.CanPost(now); err != nil {
-		// Budget exhausted: stop immediately rather than generating text that
-		// can never be posted.
+	// Reserve the budget slot atomically BEFORE any generation or webhook work,
+	// so a slow model call, a failed post, or a concurrent speaker can never
+	// overshoot the allowance. The slot is spent the moment this succeeds.
+	if _, err := c.sessions.Reserve(time.Now()); err != nil {
 		return fmt.Errorf("budget: %w", err)
 	}
 
@@ -340,9 +340,9 @@ func (c *Conductor) perform(ctx context.Context, p *persona.Persona) error {
 		}
 	}
 
-	// Debit only after a successful post (or a dry-run equivalent), so the
-	// budget accurately reflects what actually went out.
-	c.sessions.Debit(time.Now(), p.Name)
+	// Commit records the speaker. The budget slot was already consumed by
+	// Reserve; a failed send still counts (fail-stop, never runaway).
+	c.sessions.Commit(p.Name)
 	c.record(p.Name, text, discordio.OriginChoir)
 	return nil
 }
