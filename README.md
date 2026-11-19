@@ -1,5 +1,7 @@
 # ChannelChoir Unhinged
 
+<p align="center"><img src="logo.png" alt="ChannelChoir Unhinged logo" width="320"/></p>
+
 A controllable multi-persona Discord conversation engine. Fourteen lunatics, a
 conductor with brakes, chaos levels from Polite to Unhinged, and a kill switch
 that works even when Discord can't hear it.
