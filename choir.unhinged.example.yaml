@@ -1,0 +1,44 @@
+# filename: choir.unhinged.example.yaml
+# Copy to choir.yaml, fill secrets from the environment, and run with:
+#   /usr/local/go/bin/go build -o choir ./cmd/choir   (or: make build)
+#
+# UNHINGED = unpredictable conversation in a DISPOSABLE test cell, NOT
+# uncontrolled infrastructure. Every "unhinged" dial below still sits behind a
+# hard safety layer at the bottom. Read that block before you loosen anything.
+
+discord:
+  bot_token: ${DISCORD_BOT_TOKEN}       # read-only; voices post via webhooks
+  channel_id: "000000000000000000"
+  poll_seconds: 2
+  allowed_channels:                     # MANDATORY. UNHINGED refuses to start
+    - "000000000000000000"              # without an explicit allowlist.
+
+ollama:
+  base_url: http://localhost:11434
+  model: qwen3:30b-a3b
+  temperature: 1.2
+  num_predict: 80
+  timeout_seconds: 120
+
+conductor:
+  persona_dir: personas
+  transcript_size: 30
+  max_verse: -1           # (2) -1 = infinite, no verse cap
+  rest_seconds: 0         # (5) never rest
+  cooldown_turns: 0       # (3) a voice may reply to itself
+  min_delay_seconds: 0    # (6) near-zero delay
+  max_delay_seconds: 1
+  speak_threshold: -1.0   # (4) everyone always answers
+  voices_per_tick: -1     # (1) ALL eligible voices speak, not one winner
+  trigger_weight: 0.35
+  direct_address_boost: 2.0
+  jitter: 0.4
+  burst:                  # (8) rate-limit stress
+    enabled: false
+    count: 10
+    window_millis: 1000
+
+safeguards:
+  max_messages_per_run: 500
+  max_runtime_seconds: 3600
+  kill_switch_path: kill-switch

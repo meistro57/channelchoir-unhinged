@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/meistro57/channelchoir/internal/config"
@@ -17,6 +19,11 @@ import (
 
 // Conductor is the whole point of this project. Ten voices generating text is
 // easy; deciding who gets to talk, and when everybody shuts up, is the job.
+//
+// UNHINGED rips out the single-winner, verse cap, cooldowns, threshold, rest,
+// and human-style delays — but KEEPS the hard safety layer (allowlist, message
+// cap, runtime cap, kill switch, no-ping webhooks). Chaos in conversation,
+// discipline in infrastructure.
 type Conductor struct {
 	cfg      *config.Config
 	voices   []*persona.Persona
@@ -25,22 +32,18 @@ type Conductor struct {
 	rng      *rand.Rand
 	dryRun   bool
 
-	// transcript is the rolling memory of the room.
 	transcript []line
-
-	// turn increments every time anyone speaks, human or voice.
-	turn int
-
-	// lastSpoke[name] = turn number that voice last spoke on.
-	lastSpoke map[string]int
-
-	// verse counts consecutive voice messages with no human in between.
-	verse int
-
-	// restUntil is when the choir is allowed to sing again.
-	restUntil time.Time
+	turn       int
+	lastSpoke  map[string]int
+	verse      int
+	restUntil  time.Time
 
 	lastMessageID string
+
+	// UNHINGED safety state.
+	mu       sync.Mutex
+	posted   int       // total messages actually posted this run
+	started  time.Time // run start (for runtime cap)
 }
 
 type line struct {
@@ -58,6 +61,7 @@ func New(cfg *config.Config, voices []*persona.Persona, dc *discordio.Client, mo
 		rng:       rand.New(rand.NewSource(time.Now().UnixNano())),
 		dryRun:    dryRun,
 		lastSpoke: map[string]int{},
+		started:   time.Now(),
 	}
 }
 
@@ -69,6 +73,14 @@ func (c *Conductor) Run(ctx context.Context) error {
 
 	log.Printf("choir is live: %d voices, channel %s, model %s",
 		len(c.voices), c.cfg.Discord.ChannelID, c.cfg.Ollama.Model)
+	log.Printf("UNHINGED: voices_per_tick=%d, max_verse=%d, rest=%ds, cooldown=%d, threshold=%.2f, delays=%d-%ds",
+		c.cfg.Conductor.VoicesPerTick, c.cfg.Conductor.MaxVerse,
+		c.cfg.Conductor.RestSeconds, c.cfg.Conductor.CooldownTurns,
+		c.cfg.Conductor.SpeakThreshold,
+		c.cfg.Conductor.MinDelaySeconds, c.cfg.Conductor.MaxDelaySeconds)
+	log.Printf("SAFEGUARDS: allowlist=%v, max_messages=%d, max_runtime=%ds, kill_switch=%q",
+		c.cfg.Discord.AllowedChannels, c.cfg.Safeguards.MaxMessagesPerRun,
+		c.cfg.Safeguards.MaxRuntimeSeconds, c.cfg.Safeguards.KillSwitchPath)
 
 	ticker := time.NewTicker(time.Duration(c.cfg.Discord.PollSeconds) * time.Second)
 	defer ticker.Stop()
@@ -84,8 +96,37 @@ func (c *Conductor) Run(ctx context.Context) error {
 				}
 				log.Printf("tick error: %v", err)
 			}
+			if err := c.enforceHardLimits(); err != nil {
+				return err
+			}
 		}
 	}
+}
+
+// enforceHardLimits returns a terminal error once the message/runtime caps are
+// hit, so the process halts rather than running away.
+func (c *Conductor) enforceHardLimits() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cfg.Safeguards.MaxMessagesPerRun > 0 && c.posted >= c.cfg.Safeguards.MaxMessagesPerRun {
+		return fmt.Errorf("HARD LIMIT: posted %d messages (cap %d) — halting",
+			c.posted, c.cfg.Safeguards.MaxMessagesPerRun)
+	}
+	if c.cfg.Safeguards.MaxRuntimeSeconds > 0 &&
+		int(time.Since(c.started).Seconds()) >= c.cfg.Safeguards.MaxRuntimeSeconds {
+		return fmt.Errorf("HARD LIMIT: ran %d seconds (cap %d) — halting",
+			int(time.Since(c.started).Seconds()), c.cfg.Safeguards.MaxRuntimeSeconds)
+	}
+	return nil
+}
+
+// killed reports whether the external kill-switch file is present.
+func (c *Conductor) killed() bool {
+	if c.cfg.Safeguards.KillSwitchPath == "" {
+		return false
+	}
+	_, err := os.Stat(c.cfg.Safeguards.KillSwitchPath)
+	return err == nil
 }
 
 // seek jumps to the present so the choir doesn't wake up and start replying to
@@ -102,6 +143,11 @@ func (c *Conductor) seek(ctx context.Context) error {
 }
 
 func (c *Conductor) tick(ctx context.Context) error {
+	if c.killed() {
+		log.Printf("kill switch %q present — not posting", c.cfg.Safeguards.KillSwitchPath)
+		return nil
+	}
+
 	msgs, err := c.discord.FetchAfter(ctx, c.cfg.Discord.ChannelID, c.lastMessageID, 50)
 	if err != nil {
 		return err
@@ -112,11 +158,8 @@ func (c *Conductor) tick(ctx context.Context) error {
 		if strings.TrimSpace(m.Content) == "" {
 			continue
 		}
-
 		c.record(m.Speaker(), m.Content, m.IsHuman())
-
 		if m.IsHuman() {
-			// A human spoke. Wake the room up and clear the rest.
 			c.verse = 0
 			c.restUntil = time.Time{}
 		}
@@ -125,30 +168,57 @@ func (c *Conductor) tick(ctx context.Context) error {
 	if len(c.transcript) == 0 {
 		return nil
 	}
-	if time.Now().Before(c.restUntil) {
+
+	// UNHINGED: verse cap and rest are honour-only. max_verse <= 0 = infinite,
+	// rest_seconds <= 0 = never rest. A human speaker still resets the verse.
+	if c.cfg.Conductor.MaxVerse > 0 && c.verse >= c.cfg.Conductor.MaxVerse {
+		if c.cfg.Conductor.RestSeconds > 0 {
+			c.restUntil = time.Now().Add(time.Duration(c.cfg.Conductor.RestSeconds) * time.Second)
+		}
+		log.Printf("verse hit %d messages — resting until a human speaks", c.verse)
 		return nil
 	}
-	if c.verse >= c.cfg.Conductor.MaxVerse {
-		c.restUntil = time.Now().Add(time.Duration(c.cfg.Conductor.RestSeconds) * time.Second)
-		log.Printf("verse hit %d messages — resting %ds until a human speaks",
-			c.verse, c.cfg.Conductor.RestSeconds)
+	if time.Now().Before(c.restUntil) {
 		return nil
 	}
 
 	last := c.transcript[len(c.transcript)-1]
 
-	// Nobody answers themselves.
-	speaker := c.choose(last)
-	if speaker == nil {
+	// UNHINGED change (1): kill the single-winner rule — N voices speak.
+	speakers := c.chooseMany(last)
+	if len(speakers) == 0 {
 		return nil
 	}
 
-	return c.perform(ctx, speaker)
+	// Burst mode (8): if enabled, dump Count messages this tick instead of 1.
+	count := 1
+	if c.cfg.Conductor.Burst.Enabled {
+		count = c.cfg.Conductor.Burst.Count
+	}
+
+	for i := 0; i < count; i++ {
+		p := speakers[i%len(speakers)]
+		if err := c.perform(ctx, p); err != nil {
+			log.Printf("perform %s: %v", p.Name, err)
+		}
+		// Small inter-message gap within a burst (WindowMillis / count), so it
+		// is a burst and not an atomic slam, and rate-limit retries can interleave.
+		if c.cfg.Conductor.Burst.Enabled && c.cfg.Conductor.Burst.WindowMillis > 0 {
+			gap := time.Duration(c.cfg.Conductor.Burst.WindowMillis/count) * time.Millisecond
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(gap):
+			}
+		}
+	}
+
+	return nil
 }
 
-// choose scores every eligible voice against the last thing said and returns
-// the winner, or nil if the room stays quiet.
-func (c *Conductor) choose(last line) *persona.Persona {
+// chooseMany scores every voice against the last thing said and returns up to
+// VoicesPerTick speakers (all eligible when VoicesPerTick <= 0).
+func (c *Conductor) chooseMany(last line) []*persona.Persona {
 	lowered := strings.ToLower(last.text)
 
 	type scored struct {
@@ -158,40 +228,37 @@ func (c *Conductor) choose(last line) *persona.Persona {
 	var pool []scored
 
 	for _, p := range c.voices {
-		// Don't let a voice reply to itself.
 		if strings.EqualFold(p.Name, last.speaker) {
-			continue
+			continue // a voice never replies to itself (hard-won upstream rule)
 		}
 
-		cooldown := p.Cooldown
-		if cooldown == 0 {
-			cooldown = c.cfg.Conductor.CooldownTurns
+		// UNHINGED (3): cooldown_turns <= 0 = no sit-out.
+		cooldown := c.cfg.Conductor.CooldownTurns
+		if p.Cooldown > 0 {
+			cooldown = p.Cooldown
 		}
-		if lastTurn, ok := c.lastSpoke[p.Name]; ok && c.turn-lastTurn <= cooldown {
-			continue
+		if cooldown > 0 {
+			if lastTurn, ok := c.lastSpoke[p.Name]; ok && c.turn-lastTurn <= cooldown {
+				continue
+			}
 		}
 
 		score := p.Chattiness
-
 		for _, t := range p.LowerTriggers() {
 			if strings.Contains(lowered, t) {
 				score += c.cfg.Conductor.TriggerWeight
 			}
 		}
-
-		// Being named beats everything else.
 		if strings.Contains(lowered, strings.ToLower(p.Name)) {
 			score += c.cfg.Conductor.DirectAddressBoost
 		}
-
-		// A human question pulls harder than bot chatter.
 		if last.human {
 			score += 0.3
 		}
-
 		score += (c.rng.Float64() - 0.5) * 2 * c.cfg.Conductor.Jitter
 
-		if score < c.cfg.Conductor.SpeakThreshold {
+		// UNHINGED (4): threshold <= 0 = always eligible.
+		if c.cfg.Conductor.SpeakThreshold > 0 && score < c.cfg.Conductor.SpeakThreshold {
 			continue
 		}
 		pool = append(pool, scored{p, score})
@@ -201,25 +268,39 @@ func (c *Conductor) choose(last line) *persona.Persona {
 		return nil
 	}
 
-	best := pool[0]
-	for _, s := range pool[1:] {
-		if s.score > best.score {
-			best = s
+	// Sort descending by score so the strongest N speak (when capped).
+	for i := 0; i < len(pool); i++ {
+		for j := i + 1; j < len(pool); j++ {
+			if pool[j].score > pool[i].score {
+				pool[i], pool[j] = pool[j], pool[i]
+			}
 		}
 	}
-	return best.p
+
+	limit := c.cfg.Conductor.VoicesPerTick
+	if limit <= 0 || limit > len(pool) {
+		limit = len(pool)
+	}
+
+	out := make([]*persona.Persona, 0, limit)
+	for _, s := range pool[:limit] {
+		out = append(out, s.p)
+	}
+	return out
 }
 
-// perform waits a beat, generates the line, and posts it.
+// perform waits a near-zero beat (UNHINGED 6), generates, and posts.
 func (c *Conductor) perform(ctx context.Context, p *persona.Persona) error {
 	delay := c.cfg.Conductor.MinDelaySeconds
 	if spread := c.cfg.Conductor.MaxDelaySeconds - c.cfg.Conductor.MinDelaySeconds; spread > 0 {
 		delay += c.rng.Intn(spread + 1)
 	}
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(time.Duration(delay) * time.Second):
+	if delay > 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(delay) * time.Second):
+		}
 	}
 
 	text, err := c.model.Speak(ctx, c.systemPrompt(p), c.renderTranscript())
@@ -239,16 +320,15 @@ func (c *Conductor) perform(ctx context.Context, p *persona.Persona) error {
 		}
 	}
 
-	// Record locally too. The poller will also see the webhook message come
-	// back, but we dedupe by message ID, and having it now keeps the next
-	// scoring pass honest.
 	c.record(p.Name, text, false)
+
+	c.mu.Lock()
+	c.posted++
+	c.mu.Unlock()
 	return nil
 }
 
 func (c *Conductor) record(speaker, text string, human bool) {
-	// Skip an exact repeat of the last line — this is what catches our own
-	// webhook posts echoing back through the poller.
 	if n := len(c.transcript); n > 0 {
 		prev := c.transcript[n-1]
 		if prev.speaker == speaker && prev.text == text {
